@@ -5,75 +5,64 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QLabel, QLineEdit, QDateEdit, QSpinBox,
-                             QPushButton, QDialog)
+                             QPushButton, QDialog, QListWidget, QListWidgetItem,
+                             QFileDialog)
 from PyQt6.QtCore import QDate, Qt
+from PyQt6.QtGui import QIcon
+import re
 
-# 任务存储路径
-CONFIG_DIR = Path.home() / ".task_notebook"
-DATA_FILE = CONFIG_DIR / "tasks.json"
-NOTES_DIR = r"C:\Users\HuoZihang\Desktop\笔记"
+# Default paths
+DEFAULT_CONFIG_DIR = Path.home() / ".task_notebook"
+DEFAULT_DATA_FILE = DEFAULT_CONFIG_DIR / "tasks.json"
+DEFAULT_NOTES_DIR = r"C:\Users\HuoZihang\Desktop\笔记"
+SETTINGS_FILE = DEFAULT_CONFIG_DIR / "settings.json"
 
 
-class TaskEditDialog(QDialog):
-    def __init__(self, task, parent=None):
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.task = task
-        self.setWindowTitle("编辑任务")
-        self.setModal(True)
+        self.setWindowTitle("设置")
+        self.setWindowIcon(QIcon("icon.png"))
         self.initUI()
 
     def initUI(self):
         layout = QVBoxLayout()
 
-        # 任务名称（可编辑）
-        self.name_label = QLabel("任务名称:")
-        self.name_edit = QLineEdit(self.task["name"])
-        layout.addWidget(self.name_label)
-        layout.addWidget(self.name_edit)
+        # JSON file path
+        self.json_label = QLabel("任务JSON文件路径:")
+        self.json_edit = QLineEdit(self.parent().data_file)
+        self.json_browse = QPushButton("浏览")
+        self.json_browse.clicked.connect(self.browse_json)
+        json_layout = QHBoxLayout()
+        json_layout.addWidget(self.json_edit)
+        json_layout.addWidget(self.json_browse)
+        layout.addWidget(self.json_label)
+        layout.addLayout(json_layout)
 
-        # 截止日期
-        self.due_date_label = QLabel("截止日期:")
-        self.due_date_edit = QDateEdit(QDate.fromString(self.task["due_date"], "yyyy-MM-dd"))
-        self.due_date_edit.setCalendarPopup(True)
-        layout.addWidget(self.due_date_label)
-        layout.addWidget(self.due_date_edit)
+        # Notes directory path
+        self.notes_label = QLabel("笔记文件夹路径:")
+        self.notes_edit = QLineEdit(self.parent().notes_dir)
+        self.notes_browse = QPushButton("浏览")
+        self.notes_browse.clicked.connect(self.browse_notes)
+        notes_layout = QHBoxLayout()
+        notes_layout.addWidget(self.notes_edit)
+        notes_layout.addWidget(self.notes_browse)
+        layout.addWidget(self.notes_label)
+        layout.addLayout(notes_layout)
 
-        # 预期耗时
-        self.expected_time_label = QLabel("预期耗时 (小时):")
-        self.expected_time_spin = QSpinBox()
-        self.expected_time_spin.setValue(self.task["expected_time"])
-        layout.addWidget(self.expected_time_label)
-        layout.addWidget(self.expected_time_spin)
-
-        # 实际耗时
-        self.actual_time_label = QLabel("实际耗时 (小时):")
-        self.actual_time_spin = QSpinBox()
-        self.actual_time_spin.setValue(self.task["actual_time"] if self.task["actual_time"] else 0)
-        layout.addWidget(self.actual_time_label)
-        layout.addWidget(self.actual_time_spin)
-
-        # 笔记内容
-        self.note_label = QLabel("笔记内容:")
-        self.note_content = QLabel(self.load_note())
-        layout.addWidget(self.note_label)
-        layout.addWidget(self.note_content)
-
-        # 按钮
+        # Buttons
         button_layout = QHBoxLayout()
         self.save_button = QPushButton("保存")
-        self.save_button.clicked.connect(self.save_details)
-        self.delete_button = QPushButton("删除")
-        self.delete_button.clicked.connect(self.delete_task)
-        self.close_button = QPushButton("关闭")
-        self.close_button.clicked.connect(self.reject)
+        self.save_button.clicked.connect(self.save_settings)
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.clicked.connect(self.reject)
         button_layout.addWidget(self.save_button)
-        button_layout.addWidget(self.delete_button)
-        button_layout.addWidget(self.close_button)
+        button_layout.addWidget(self.cancel_button)
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
 
-        # 样式
+        # Styles
         self.setStyleSheet("""
             QDialog {
                 background-color: #333333;
@@ -83,7 +72,7 @@ class TaskEditDialog(QDialog):
             QLabel {
                 color: #FFFFFF;
             }
-            QLineEdit, QDateEdit, QSpinBox {
+            QLineEdit {
                 background-color: #444444;
                 color: #FFFFFF;
                 border: 1px solid #555555;
@@ -107,155 +96,126 @@ class TaskEditDialog(QDialog):
             }
         """)
 
-    def save_details(self):
-        old_name = self.task["name"]
-        new_name = self.name_edit.text()
-        self.task["name"] = new_name
-        self.task["due_date"] = self.due_date_edit.date().toString("yyyy-MM-dd")
-        self.task["expected_time"] = self.expected_time_spin.value()
-        self.task["actual_time"] = self.actual_time_spin.value()
-        if self.task["actual_time"] > 0:
-            self.adjust_review_interval()
-        # Update daily note if task name changed
-        if old_name != new_name and self.task.get("daily_note"):
-            self.update_daily_note_name(old_name, new_name)
-        self.parent().save_tasks()
-        self.accept()
+    def browse_json(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "选择JSON文件", str(DEFAULT_DATA_FILE), "JSON Files (*.json)")
+        if file_path:
+            self.json_edit.setText(file_path)
 
-    def delete_task(self):
-        self.parent().delete_task(self.task)
-        self.accept()
+    def browse_notes(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "选择笔记文件夹", str(DEFAULT_NOTES_DIR))
+        if dir_path:
+            self.notes_edit.setText(dir_path)
 
-    def adjust_review_interval(self):
-        last_review = self.task["completed_reviews"][-1] if self.task["completed_reviews"] else {
-            "date": self.task["created"], "actual_time": self.task["expected_time"]}
-        base_intervals = [1, 2, 4, 7, 15, 30]
-        review_index = len(self.task["completed_reviews"])
-        interval = base_intervals[min(review_index, len(base_intervals) - 1)]
-
-        time_ratio = self.task["actual_time"] / self.task["expected_time"]
-        interval *= (0.8 if time_ratio > 1 else 1.2 if time_ratio < 1 else 1)
-
-        last_date = datetime.strptime(last_review["date"], "%Y-%m-%d")
-        next_date = last_date + timedelta(days=int(interval))
-        self.task["review_dates"] = [next_date.strftime("%Y-%m-%d")]
-        self.task["completed_reviews"].append(
-            {"date": datetime.now().strftime("%Y-%m-%d"), "actual_time": self.task["actual_time"]})
-
-    def update_daily_note_name(self, old_name, new_name):
-        daily_note_path = Path(self.task.get("daily_note", ""))
-        if not daily_note_path.exists():
-            return
+    def save_settings(self):
+        settings = {
+            "data_file": self.json_edit.text(),
+            "notes_dir": self.notes_edit.text()
+        }
         try:
-            with open(daily_note_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            # Replace old task name heading with new one
-            content = content.replace(f"# {old_name}", f"# {new_name}")
-            with open(daily_note_path, "w", encoding="utf-8") as f:
-                f.write(content)
+            if not DEFAULT_CONFIG_DIR.exists():
+                DEFAULT_CONFIG_DIR.mkdir(parents=True)
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+            self.parent().data_file = self.json_edit.text()
+            self.parent().notes_dir = self.notes_edit.text()
+            self.parent().load_stages()
+            self.parent().load_stage_cards()
+            self.accept()
         except Exception as e:
-            print(f"Failed to update daily note name: {e}")
-
-    def load_note(self):
-        from re import findall
-
-        daily_note_path = Path(self.task.get("daily_note", ""))
-        if not daily_note_path.exists():
-            return "未找到每日笔记"
-
-        # Read daily note content
-        try:
-            with open(daily_note_path, "r", encoding="utf-8") as f:
-                daily_content = f.read()
-            # Extract section for this task
-            task_section = self.extract_task_section(daily_content, self.task["name"])
-        except Exception as e:
-            return f"读取每日笔记失败: {str(e)}"
-
-        # Find [[link]] patterns in the task section
-        links = findall(r'\[\[([^\]]+)\]\]', task_section)
-        if not links:
-            return task_section[:200] + "..." if len(task_section) > 200 else task_section
-
-        # Collect content from linked files
-        notes_content = []
-        notes_base_dir = Path(NOTES_DIR)
-        for link in links:
-            note_path = notes_base_dir / f"{link}.md"
-            if note_path.exists():
-                try:
-                    with open(note_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                        notes_content.append(f"### {link}\n{content[:200]}{'...' if len(content) > 200 else ''}")
-                except Exception as e:
-                    notes_content.append(f"### {link}\n读取失败: {str(e)}")
-            else:
-                notes_content.append(f"### {link}\n未找到文件")
-
-        # Combine task section and linked content
-        combined_content = task_section[:200] + "\n\n" + "\n\n".join(notes_content)
-        return combined_content[:1000] + "..." if len(combined_content) > 1000 else combined_content
-
-    def extract_task_section(self, content, task_name):
-        # Find the section starting with # task_name
-        import re
-        pattern = rf'# {re.escape(task_name)}\n(.*?)(?=\n# |\Z)'
-        match = re.search(pattern, content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return ""
+            print(f"Failed to save settings: {e}")
 
 
-class TaskCard(QWidget):
-    def __init__(self, task_data, parent=None):
+class StageDialog(QDialog):
+    def __init__(self, stage, parent=None):
         super().__init__(parent)
-        self.task = task_data
+        self.stage = stage
+        self.setWindowTitle(f"阶段: {stage['name']}")
+        self.setWindowIcon(QIcon("icon.png"))
+        self.setModal(True)
         self.initUI()
 
     def initUI(self):
-        self.layout = QHBoxLayout()
+        layout = QVBoxLayout()
 
-        # Checkbox for completion
-        self.checkbox = QCheckBox(self.task["name"])
-        self.checkbox.setChecked(self.task.get("completed", False))
-        self.checkbox.stateChanged.connect(self.toggle_completion)
-        self.layout.addWidget(self.checkbox)
+        # Stage name
+        self.name_label = QLabel("阶段名称:")
+        self.name_edit = QLineEdit(self.stage["name"])
+        layout.addWidget(self.name_label)
+        layout.addWidget(self.name_edit)
 
-        # Edit button
-        self.edit_button = QPushButton("Edit")
-        self.edit_button.clicked.connect(self.open_dialog)
-        self.layout.addWidget(self.edit_button)
+        # Due date
+        self.due_date_label = QLabel("截止日期:")
+        self.due_date_edit = QDateEdit(QDate.fromString(self.stage["due_date"], "yyyy-MM-dd"))
+        self.due_date_edit.setCalendarPopup(True)
+        layout.addWidget(self.due_date_label)
+        layout.addWidget(self.due_date_edit)
 
-        # Review time arrow
-        self.arrow_label = QLabel()
-        self.update_arrow()
-        self.layout.addWidget(self.arrow_label)
+        # Expected time
+        self.expected_time_label = QLabel("预期耗时 (小时):")
+        self.expected_time_spin = QSpinBox()
+        self.expected_time_spin.setValue(self.stage["expected_time"])
+        layout.addWidget(self.expected_time_label)
+        layout.addWidget(self.expected_time_spin)
 
-        self.setLayout(self.layout)
+        # Actual time
+        self.actual_time_label = QLabel("实际耗时 (小时):")
+        self.actual_time_spin = QSpinBox()
+        self.actual_time_spin.setValue(self.stage["actual_time"] if self.stage["actual_time"] else 0)
+        layout.addWidget(self.actual_time_label)
+        layout.addWidget(self.actual_time_spin)
 
-        # Enable double-click to open dialog
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
-        self.mouseDoubleClickEvent = self.open_dialog_on_double_click
+        # Knowledge points
+        self.kp_label = QLabel("知识点 (任务):")
+        self.kp_list = QListWidget()
+        self.populate_kp_list()
+        layout.addWidget(self.kp_label)
+        layout.addWidget(self.kp_list)
 
-        # 样式，灰色样式用于非今日任务
-        today = datetime.now().strftime("%Y-%m-%d")
-        is_due_today = today in self.task.get("review_dates", [])
+        # Add knowledge point
+        self.kp_input = QLineEdit()
+        self.kp_input.setPlaceholderText("输入知识点名称并按回车添加...")
+        try:
+            self.kp_input.returnPressed.disconnect()
+        except:
+            pass
+        self.kp_input.returnPressed.connect(self.add_knowledge_point)
+        layout.addWidget(self.kp_input)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.save_button = QPushButton("保存")
+        self.save_button.clicked.connect(self.save_details)
+        self.delete_button = QPushButton("删除阶段")
+        self.delete_button.clicked.connect(self.delete_stage)
+        self.close_button = QPushButton("关闭")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.save_button)
+        button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+        # Styles
         self.setStyleSheet("""
-            QWidget {
-                background-color: %s;
+            QDialog {
+                background-color: #333333;
                 border-radius: 8px;
-                padding: 5px;
-                margin: 5px;
                 box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
             }
-            QWidget:hover {
-                box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7);
-            }
-            QCheckBox, QPushButton {
+            QLabel {
                 color: #FFFFFF;
+            }
+            QLineEdit, QDateEdit, QSpinBox, QListWidget {
+                background-color: #444444;
+                color: #FFFFFF;
+                border: 1px solid #555555;
+                border-radius: 5px;
+                padding: 5px;
             }
             QPushButton {
                 background-color: #4CAF50;
+                color: white;
                 border-radius: 5px;
                 padding: 5px;
             }
@@ -268,21 +228,241 @@ class TaskCard(QWidget):
             QPushButton:nth-child(2):hover {
                 background-color: #FF3333;
             }
+        """)
+
+    def populate_kp_list(self):
+        self.kp_list.clear()
+        for kp in self.stage.get("knowledge_points", []):
+            item = QListWidgetItem()
+            widget = QWidget()
+            layout = QHBoxLayout()
+            checkbox = QCheckBox(kp["name"])
+            checkbox.setChecked(kp["completed"])
+            checkbox.stateChanged.connect(lambda state, k=kp: self.update_kp_completion(k, state))
+            layout.addWidget(checkbox)
+            layout.addStretch()
+            widget.setLayout(layout)
+            item.setSizeHint(widget.sizeHint())
+            self.kp_list.addItem(item)
+            self.kp_list.setItemWidget(item, widget)
+
+    def update_kp_completion(self, kp, state):
+        kp["completed"] = bool(state)
+        self.parent().save_stages()
+
+    def add_knowledge_point(self):
+        print("Adding knowledge point")
+        kp_name = self.kp_input.text().strip()
+        if kp_name:
+            try:
+                if "knowledge_points" not in self.stage:
+                    self.stage["knowledge_points"] = []
+                self.stage["knowledge_points"].append({"name": kp_name, "completed": False})
+                self.update_daily_note_kp(kp_name)
+                self.populate_kp_list()
+                self.parent().save_stages()
+                self.kp_input.clear()
+            except Exception as e:
+                print(f"Error adding knowledge point: {e}")
+
+    def update_daily_note_kp(self, kp_name):
+        daily_note_path = Path(self.stage.get("daily_note", ""))
+        if not daily_note_path.exists():
+            return
+        try:
+            with open(daily_note_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            task_section = self.extract_task_section(content, self.stage["name"])
+            if "Related Knowledge Points:" in task_section:
+                new_section = task_section + f", [[{kp_name}]]"
+                content = content.replace(task_section, new_section)
+            else:
+                new_section = task_section + f"\n- Related Knowledge Points: [[{kp_name}]]"
+                content = content.replace(task_section, new_section)
+            with open(daily_note_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            print(f"Failed to update daily note with knowledge point: {e}")
+
+    def save_details(self):
+        old_name = self.stage["name"]
+        new_name = self.name_edit.text()
+        self.stage["name"] = new_name
+        self.stage["due_date"] = self.due_date_edit.date().toString("yyyy-MM-dd")
+        self.stage["expected_time"] = self.expected_time_spin.value()
+        self.stage["actual_time"] = self.actual_time_spin.value()
+        if self.stage["actual_time"] > 0:
+            self.adjust_review_interval()
+        if old_name != new_name and self.stage.get("daily_note"):
+            self.update_daily_note_name(old_name, new_name)
+        self.parent().save_stages()
+        self.accept()
+
+    def delete_stage(self):
+        self.parent().delete_stage(self.stage)
+        self.accept()
+
+    def adjust_review_interval(self):
+        last_review = self.stage["completed_reviews"][-1] if self.stage["completed_reviews"] else {
+            "date": self.stage["created"], "actual_time": self.stage["expected_time"]}
+        base_intervals = [1, 2, 4, 7, 15, 30]
+        review_index = len(self.stage["completed_reviews"])
+        interval = base_intervals[min(review_index, len(base_intervals) - 1)]
+
+        time_ratio = self.stage["actual_time"] / self.stage["expected_time"]
+        interval *= (0.8 if time_ratio > 1 else 1.2 if time_ratio < 1 else 1)
+
+        last_date = datetime.strptime(last_review["date"], "%Y-%m-%d")
+        next_date = last_date + timedelta(days=int(interval))
+        self.stage["review_dates"] = [next_date.strftime("%Y-%m-%d")]
+        self.stage["completed_reviews"].append(
+            {"date": datetime.now().strftime("%Y-%m-%d"), "actual_time": self.stage["actual_time"]})
+
+    def update_daily_note_name(self, old_name, new_name):
+        daily_note_path = Path(self.stage.get("daily_note", ""))
+        if not daily_note_path.exists():
+            return
+        try:
+            with open(daily_note_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            content = content.replace(f"# {old_name}", f"# {new_name}")
+            with open(daily_note_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            print(f"Failed to update daily note name: {e}")
+
+    def extract_task_section(self, content, stage_name):
+        pattern = rf'# {re.escape(stage_name)}\n(.*?)(?=\n# |\Z)'
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+
+class StageCard(QWidget):
+    def __init__(self, stage_data, parent=None):
+        super().__init__(parent)
+        self.stage = stage_data
+        self.parent_widget = parent  # Reference to parent TaskNotebook for saving
+        self.is_expanded = False  # Track expansion state
+        self.initUI()
+
+    def initUI(self):
+        self.layout = QVBoxLayout()
+
+        # Header: Toggle button with stage name and review arrow
+        self.header_layout = QHBoxLayout()
+        self.toggle_button = QPushButton(f"▶ {self.stage['name']}")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(False)
+        self.toggle_button.clicked.connect(self.toggle_knowledge_points)
+        self.header_layout.addWidget(self.toggle_button)
+        self.arrow_label = QLabel()
+        self.update_arrow()
+        self.header_layout.addWidget(self.arrow_label)
+        self.layout.addLayout(self.header_layout)
+
+        # Knowledge points container
+        self.kp_container = QWidget()
+        self.kp_layout = QVBoxLayout()
+        self.kp_container.setLayout(self.kp_layout)
+        self.kp_container.setVisible(False)  # Initially collapsed
+        self.populate_kp_list()
+        self.layout.addWidget(self.kp_container)
+
+        self.setLayout(self.layout)
+
+        # Enable clicking card to open dialog, excluding toggle button and checkboxes
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+        # Styles
+        today = datetime.now().strftime("%Y-%m-%d")
+        is_due_today = today in self.stage.get("review_dates", [])
+        self.setStyleSheet("""
+            QWidget {
+                background-color: %s;
+                border-radius: 8px;
+                padding: 8px;
+                margin: 5px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+            }
+            QWidget:hover {
+                box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7);
+            }
+            QPushButton {
+                background-color: transparent;
+                color: #FFFFFF;
+                border: none;
+                text-align: left;
+                font-size: 12px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #555555;
+                border-radius: 5px;
+            }
+            QPushButton:checked {
+                background-color: #555555;
+                border-radius: 5px;
+            }
             QLabel {
                 color: #FFFFFF;
                 font-size: 12px;
             }
+            QCheckBox {
+                color: #BBBBBB;
+                font-size: 11px;
+                padding: 3px;
+                margin-left: 20px;  /* Indent knowledge points */
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #BBBBBB;
+                background-color: #444444;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border: 1px solid #4CAF50;
+            }
         """ % ("#333333" if is_due_today else "#444444"))
 
-    def toggle_completion(self):
-        self.task["completed"] = self.checkbox.isChecked()
-        self.parent().save_tasks()
+    def toggle_knowledge_points(self):
+        self.is_expanded = self.toggle_button.isChecked()
+        self.kp_container.setVisible(self.is_expanded)
+        # Update the arrow indicator
+        self.toggle_button.setText(f"{'▼' if self.is_expanded else '▶'} {self.stage['name']}")
+
+    def populate_kp_list(self):
+        # Clear existing items
+        for i in reversed(range(self.kp_layout.count())):
+            item = self.kp_layout.itemAt(i)
+            if item.widget():
+                item.widget().setParent(None)
+
+        kps = self.stage.get("knowledge_points", [])
+        if not kps:
+            label = QLabel("无知识点")
+            label.setStyleSheet("color: #BBBBBB; font-size: 11px; padding: 3px; margin-left: 20px;")
+            self.kp_layout.addWidget(label)
+            return
+
+        # Add each knowledge point as a checkbox
+        for kp in kps:
+            checkbox = QCheckBox(kp["name"])
+            checkbox.setChecked(kp["completed"])
+            checkbox.stateChanged.connect(lambda state, k=kp: self.update_kp_completion(k, state))
+            self.kp_layout.addWidget(checkbox)
+
+    def update_kp_completion(self, kp, state):
+        kp["completed"] = bool(state)
+        self.parent_widget.save_stages()  # Save changes via parent TaskNotebook
 
     def update_arrow(self):
-        if not self.task["review_dates"]:
+        if not self.stage["review_dates"]:
             self.arrow_label.setText("")
             return
-        next_review = datetime.strptime(self.task["review_dates"][0], "%Y-%m-%d")
+        next_review = datetime.strptime(self.stage["review_dates"][0], "%Y-%m-%d")
         today = datetime.now()
         diff_days = (next_review - today).days
         color = "color: red;" if diff_days <= 0 else "color: yellow;" if diff_days <= 3 else "color: green;"
@@ -290,50 +470,63 @@ class TaskCard(QWidget):
         self.arrow_label.setText(f"➜ {date_str}")
         self.arrow_label.setStyleSheet(color)
 
-    def open_dialog(self, event=None):
-        dialog = TaskEditDialog(self.task, self.parent())
-        dialog.exec()
-        self.checkbox.setText(self.task["name"])
-        self.checkbox.setChecked(self.task.get("completed", False))
-        self.update_arrow()
-
-    def open_dialog_on_double_click(self, event):
+    def mousePressEvent(self, event):
+        # Prevent dialog from opening if clicking on a checkbox or toggle button
         if event.button() == Qt.MouseButton.LeftButton:
-            self.open_dialog()
+            widget = self.childAt(event.pos())
+            if isinstance(widget, (QCheckBox, QPushButton)):
+                return  # Let the checkbox or toggle button handle the click
+            dialog = StageDialog(self.stage, self.parent())
+            dialog.exec()
+            self.toggle_button.setText(f"{'▼' if self.is_expanded else '▶'} {self.stage['name']}")
+            self.populate_kp_list()  # Refresh knowledge points
+            self.update_arrow()
 
 
 class TaskNotebook(QWidget):
     def __init__(self):
         super().__init__()
-        self.tasks = []
-        self.load_tasks()
+        self.stages = []
+        self.data_file = str(DEFAULT_DATA_FILE)
+        self.notes_dir = DEFAULT_NOTES_DIR
+        self.load_settings()
+        self.load_stages()
         self.initUI()
 
     def initUI(self):
         self.layout = QVBoxLayout()
 
-        # 任务输入框
-        self.task_input = QLineEdit()
-        self.task_input.setPlaceholderText("输入任务并按回车创建...")
-        self.task_input.returnPressed.connect(self.add_task)
-        self.layout.addWidget(self.task_input)
+        # Stage input
+        self.stage_input = QLineEdit()
+        self.stage_input.setPlaceholderText("输入阶段名称并按回车创建...")
+        self.stage_input.returnPressed.connect(self.add_stage)
+        self.layout.addWidget(self.stage_input)
 
-        # 任务列表
-        self.task_list = QVBoxLayout()
-        self.layout.addLayout(self.task_list)
+        # Settings button
+        self.settings_button = QPushButton("设置")
+        self.settings_button.clicked.connect(self.open_settings)
+        self.layout.addWidget(self.settings_button)
+
+        # Stage list
+        self.stage_list = QVBoxLayout()
+        self.layout.addLayout(self.stage_list)
 
         self.setLayout(self.layout)
-        self.setWindowTitle("任务管理记事本")
+        self.setWindowTitle("火腿肠御用记忆管理器")
+        self.setWindowIcon(QIcon("icon.png"))
         self.setStyleSheet("""
             QWidget {
                 background-color: #1C1C1C;
             }
-            QLineEdit {
+            QLineEdit, QPushButton {
                 background-color: #333333;
                 color: #FFFFFF;
                 border: 1px solid #555555;
                 border-radius: 5px;
                 padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
             }
             QLabel {
                 color: #FFFFFF;
@@ -344,80 +537,119 @@ class TaskNotebook(QWidget):
         self.resize(600, 400)
         self.show()
 
-        # 初始化任务卡片
-        self.load_task_cards()
+        self.load_stage_cards()
 
-    def load_tasks(self):
-        print(f"Loading tasks from: {DATA_FILE}")  # Debug file path
+    def load_settings(self):
         try:
-            if not CONFIG_DIR.exists():
-                CONFIG_DIR.mkdir(parents=True)
-            if not DATA_FILE.exists():
-                # Initialize empty tasks file if it doesn't exist
-                with open(DATA_FILE, "w", encoding="utf-8") as f:
+            if SETTINGS_FILE.exists():
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+                self.data_file = settings.get("data_file", str(DEFAULT_DATA_FILE))
+                self.notes_dir = settings.get("notes_dir", DEFAULT_NOTES_DIR)
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
+    def open_settings(self):
+        dialog = SettingsDialog(self)
+        dialog.exec()
+
+    def load_stages(self):
+        print(f"Loading stages from: {self.data_file}")
+        try:
+            data_file = Path(self.data_file)
+            if not data_file.parent.exists():
+                data_file.parent.mkdir(parents=True)
+            if not data_file.exists():
+                with open(data_file, "w", encoding="utf-8") as f:
                     json.dump([], f, ensure_ascii=False, indent=2)
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                self.tasks = json.load(f)
-            # Migrate existing tasks to include new fields
+            with open(data_file, "r", encoding="utf-8") as f:
+                self.stages = json.load(f)
             modified = False
-            for task in self.tasks:
-                if "completed" not in task:
-                    task["completed"] = False
+            for stage in self.stages:
+                if "completed" in stage:
+                    del stage["completed"]
                     modified = True
-                if "daily_note" not in task:
-                    task["daily_note"] = ""
+                if "daily_note" not in stage:
+                    stage["daily_note"] = ""
                     modified = True
-            # Save only if migration modified tasks
+                if "knowledge_points" not in stage:
+                    stage["knowledge_points"] = []
+                    modified = True
             if modified:
-                self.save_tasks()
-            print(f"Loaded {len(self.tasks)} tasks")  # Debug task count
+                self.save_stages()
+            print(f"Loaded {len(self.stages)} stages")
         except json.JSONDecodeError as e:
-            print(f"Error decoding JSON from {DATA_FILE}: {e}. Initializing empty task list.")
-            self.tasks = []
-            self.save_tasks()  # Reset file to valid JSON
+            print(f"Error decoding JSON from {self.data_file}: {e}. Initializing empty stage list.")
+            self.stages = []
+            self.save_stages()
         except PermissionError as e:
-            print(f"Permission error accessing {DATA_FILE}: {e}. Using empty task list.")
-            self.tasks = []
+            print(f"Permission error accessing {self.data_file}: {e}. Using empty stage list.")
+            self.stages = []
         except Exception as e:
-            print(f"Unexpected error loading tasks from {DATA_FILE}: {e}. Using empty task list.")
-            self.tasks = []
+            print(f"Unexpected error loading stages from {self.data_file}: {e}. Using empty stage list.")
+            self.stages = []
 
-    def save_tasks(self):
+    def save_stages(self):
         try:
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+            with open(self.data_file, "w", encoding="utf-8") as f:
+                json.dump(self.stages, f, ensure_ascii=False, indent=2)
         except PermissionError as e:
-            print(f"Permission error saving to {DATA_FILE}: {e}")
+            print(f"Permission error saving to {self.data_file}: {e}")
         except Exception as e:
-            print(f"Unexpected error saving to {DATA_FILE}: {e}")
+            print(f"Unexpected error saving to {self.data_file}: {e}")
 
-    def load_task_cards(self):
-        # Clear existing cards
-        for i in reversed(range(self.task_list.count())):
-            self.task_list.itemAt(i).widget().setParent(None)
+    def load_stage_cards(self):
+        for i in reversed(range(self.stage_list.count())):
+            self.stage_list.itemAt(i).widget().setParent(None)
 
-        # Show all tasks, with visual distinction for those due today
-        if not self.tasks:
-            # Display encouraging message if no tasks exist
-            encouraging_label = QLabel("No tasks yet! Create one to get started!")
-            self.task_list.addWidget(encouraging_label)
+        if not self.stages:
+            encouraging_label = QLabel("No stages yet! Create one to get started!")
+            self.stage_list.addWidget(encouraging_label)
         else:
-            for task in self.tasks:
-                task_card = TaskCard(task, self)
-                self.task_list.addWidget(task_card)
+            for stage in self.stages:
+                stage_card = StageCard(stage, self)
+                self.stage_list.addWidget(stage_card)
 
-    def create_daily_note(self, date_str, task_name):
-        daily_notes_dir = Path(NOTES_DIR) / "daily_notes"
+    def add_stage(self):
+        stage_name = self.stage_input.text().strip()
+        if stage_name:
+            today = datetime.now().strftime("%Y-%m-%d")
+            category = stage_name.split("-")[0] if "-" in stage_name else "未分类"
+            daily_note_path = self.create_daily_note(today, stage_name)
+            stage = {
+                "name": stage_name,
+                "category": category,
+                "created": today,
+                "due_date": today,
+                "daily_note": str(daily_note_path),
+                "expected_time": 10,
+                "actual_time": None,
+                "review_dates": [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")],
+                "completed_reviews": [],
+                "knowledge_points": []
+            }
+            self.stages.append(stage)
+            self.save_stages()
+            stage_card = StageCard(stage, self)
+            for i in reversed(range(self.stage_list.count())):
+                self.stage_list.itemAt(i).widget().setParent(None)
+            self.stage_list.addWidget(stage_card)
+            for other_stage in self.stages:
+                if other_stage != stage:
+                    other_stage_card = StageCard(other_stage, self)
+                    self.stage_list.addWidget(other_stage_card)
+            self.stage_input.clear()
+
+    def create_daily_note(self, date_str, stage_name):
+        daily_notes_dir = Path(self.notes_dir) / "daily_notes"
         daily_notes_dir.mkdir(parents=True, exist_ok=True)
         daily_note_path = daily_notes_dir / f"{date_str}.md"
 
-        # Add task under its own heading
-        content = f"# {task_name}\n- Related Knowledge Points: \n"
+        content = f"# {stage_name}\n- Related Knowledge Points: \n"
         if daily_note_path.exists():
             with open(daily_note_path, "r", encoding="utf-8") as f:
                 existing_content = f.read()
-            # Append new task if it doesn't exist
-            if f"# {task_name}" not in existing_content:
+            if f"# {stage_name}" not in existing_content:
                 content = existing_content.rstrip() + "\n\n" + content
             else:
                 content = existing_content
@@ -426,60 +658,25 @@ class TaskNotebook(QWidget):
 
         return daily_note_path
 
-    def add_task(self):
-        task_name = self.task_input.text()
-        if task_name:
-            today = datetime.now().strftime("%Y-%m-%d")
-            category = task_name.split("-")[0] if "-" in task_name else "未分类"
-            daily_note_path = self.create_daily_note(today, task_name)
-            task = {
-                "name": task_name,
-                "category": category,
-                "created": today,
-                "due_date": today,
-                "daily_note": str(daily_note_path),
-                "expected_time": 1,
-                "actual_time": None,
-                "review_dates": [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")],
-                "completed_reviews": [],
-                "completed": False
-            }
-            self.tasks.append(task)
-            self.save_tasks()
-            # Create and add task card immediately
-            task_card = TaskCard(task, self)
-            # Clear current task list (including encouraging message) and add new task
-            for i in reversed(range(self.task_list.count())):
-                self.task_list.itemAt(i).widget().setParent(None)
-            self.task_list.addWidget(task_card)
-            # Re-add other tasks
-            for other_task in self.tasks:
-                if other_task != task:
-                    other_task_card = TaskCard(other_task, self)
-                    self.task_list.addWidget(other_task_card)
-            self.task_input.clear()
-
-    def delete_task(self, task):
-        # Remove task from daily note
-        daily_note_path = Path(task.get("daily_note", ""))
+    def delete_stage(self, stage):
+        daily_note_path = Path(stage.get("daily_note", ""))
         if daily_note_path.exists():
             try:
                 with open(daily_note_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                # Remove section for this task
-                import re
-                pattern = rf'# {re.escape(task["name"])}\n(.*?)(?=\n# |\Z)'
+                pattern = rf'# {re.escape(stage["name"])}\n(.*?)(?=\n# |\Z)'
                 content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
                 with open(daily_note_path, "w", encoding="utf-8") as f:
                     f.write(content)
             except Exception as e:
                 print(f"Failed to update daily note on delete: {e}")
-        self.tasks.remove(task)
-        self.save_tasks()
-        self.load_task_cards()
+        self.stages.remove(stage)
+        self.save_stages()
+        self.load_stage_cards()
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon("icon.png"))
     window = TaskNotebook()
     sys.exit(app.exec())
