@@ -1,332 +1,485 @@
+import sys
+import json
 import os
-import customtkinter as ctk
-from tkinter import ttk, filedialog, messagebox
-import sqlite3
+from pathlib import Path
 from datetime import datetime, timedelta
-import glob
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.dates as mdates
-from collections import Counter
-from tkcalendar import Calendar
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+                             QCheckBox, QLabel, QLineEdit, QDateEdit, QSpinBox,
+                             QPushButton, QDialog)
+from PyQt6.QtCore import QDate, Qt
+
+# 任务存储路径
+CONFIG_DIR = Path.home() / ".task_notebook"
+DATA_FILE = CONFIG_DIR / "tasks.json"
+NOTES_DIR = r"C:\Users\HuoZihang\Desktop\笔记"
 
 
-class EbbinghausNoteApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Ebbinghaus Note Reviewer")
-        self.root.geometry("900x700")
-        self.vault_path = r"C:\Users\HuoZihang\Desktop\笔记"
-        self.conn = None
-        self.notes = []
-        self.review_intervals = {
-            "proficient": [1, 2, 4, 7, 15],  # days
-            "not_proficient": [1, 2, 4, 7],
-            "forgotten": [0]
-        }
-        ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("blue")
-        self.setup_db()
-        self.create_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+class TaskEditDialog(QDialog):
+    def __init__(self, task, parent=None):
+        super().__init__(parent)
+        self.task = task
+        self.setWindowTitle("编辑任务")
+        self.setModal(True)
+        self.initUI()
 
-    def setup_db(self):
-        self.conn = sqlite3.connect("notes_review.db")
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS notes (
-                file_path TEXT PRIMARY KEY,
-                subject TEXT,
-                status TEXT,
-                review_count INTEGER,
-                last_reviewed DATE,
-                next_review DATE
-            )
-        ''')
-        self.conn.commit()
+    def initUI(self):
+        layout = QVBoxLayout()
 
-    def create_ui(self):
-        # Main frame
-        main_frame = ctk.CTkFrame(self.root, corner_radius=12, fg_color="transparent")
-        main_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        # 任务名称（可编辑）
+        self.name_label = QLabel("任务名称:")
+        self.name_edit = QLineEdit(self.task["name"])
+        layout.addWidget(self.name_label)
+        layout.addWidget(self.name_edit)
 
-        # Tabview
-        self.tabview = ctk.CTkTabview(main_frame, fg_color="#F5F5F7", segmented_button_selected_color="#007AFF")
-        self.tabview.grid(row=0, column=0, sticky="nsew")
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(0, weight=1)
+        # 截止日期
+        self.due_date_label = QLabel("截止日期:")
+        self.due_date_edit = QDateEdit(QDate.fromString(self.task["due_date"], "yyyy-MM-dd"))
+        self.due_date_edit.setCalendarPopup(True)
+        layout.addWidget(self.due_date_label)
+        layout.addWidget(self.due_date_edit)
 
-        # Tabs
-        self.tabview.add("Review Notes")
-        self.tabview.add("Statistics")
-        self.tabview.add("Check-in")
+        # 预期耗时
+        self.expected_time_label = QLabel("预期耗时 (小时):")
+        self.expected_time_spin = QSpinBox()
+        self.expected_time_spin.setValue(self.task["expected_time"])
+        layout.addWidget(self.expected_time_label)
+        layout.addWidget(self.expected_time_spin)
 
-        # Review Notes tab
-        self.create_review_tab(self.tabview.tab("Review Notes"))
+        # 实际耗时
+        self.actual_time_label = QLabel("实际耗时 (小时):")
+        self.actual_time_spin = QSpinBox()
+        self.actual_time_spin.setValue(self.task["actual_time"] if self.task["actual_time"] else 0)
+        layout.addWidget(self.actual_time_label)
+        layout.addWidget(self.actual_time_spin)
 
-        # Statistics tab
-        self.create_stats_tab(self.tabview.tab("Statistics"))
+        # 笔记内容
+        self.note_label = QLabel("笔记内容:")
+        self.note_content = QLabel(self.load_note())
+        layout.addWidget(self.note_label)
+        layout.addWidget(self.note_content)
 
-        # Check-in tab
-        self.create_checkin_tab(self.tabview.tab("Check-in"))
+        # 按钮
+        button_layout = QHBoxLayout()
+        self.save_button = QPushButton("保存")
+        self.save_button.clicked.connect(self.save_details)
+        self.delete_button = QPushButton("删除")
+        self.delete_button.clicked.connect(self.delete_task)
+        self.close_button = QPushButton("关闭")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.save_button)
+        button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
 
-        # Keyboard shortcuts
-        self.root.bind("<Control-a>", self.select_all_notes)
-        self.root.bind("<Control-r>", lambda event: self.load_notes())
-        self.root.bind("<Control-b>", lambda event: self.browse_vault())
-        self.root.bind("<Control-p>", lambda event: self.update_status("proficient"))
-        self.root.bind("<Control-n>", lambda event: self.update_status("not_proficient"))
-        self.root.bind("<Control-f>", lambda event: self.update_status("forgotten"))
-        self.root.bind("<Control-t>", lambda event: self.tabview.set("Statistics"))
-        self.root.bind("<Control-k>", lambda event: self.tabview.set("Check-in"))
+        self.setLayout(layout)
 
-    def create_review_tab(self, tab):
-        # Vault selection
-        vault_frame = ctk.CTkFrame(tab, corner_radius=10, fg_color="#F5F5F7")
-        vault_frame.grid(row=0, column=0, sticky="ew", pady=10)
-        ctk.CTkLabel(vault_frame, text="Obsidian Vault Path:", font=("Roboto", 14, "bold")).grid(row=0, column=0,
-                                                                                                 sticky="w", padx=15,
-                                                                                                 pady=10)
-        self.vault_entry = ctk.CTkEntry(vault_frame, width=400, font=("Roboto", 12), corner_radius=8,
-                                        border_color="#D2D2D7")
-        self.vault_entry.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
-        self.vault_entry.insert(0, self.vault_path)
-        ctk.CTkButton(vault_frame, text="Browse (Ctrl+B)", command=self.browse_vault, font=("Roboto", 12),
-                      corner_radius=8, fg_color="#007AFF", border_width=0, hover_color="#005BB5").grid(row=0, column=2,
-                                                                                                       padx=10)
+        # 样式
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #333333;
+                border-radius: 8px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+            }
+            QLabel {
+                color: #FFFFFF;
+            }
+            QLineEdit, QDateEdit, QSpinBox {
+                background-color: #444444;
+                color: #FFFFFF;
+                border: 1px solid #555555;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45A049;
+            }
+            QPushButton:nth-child(2) {
+                background-color: #FF5555;
+            }
+            QPushButton:nth-child(2):hover {
+                background-color: #FF3333;
+            }
+        """)
 
-        # Load notes button
-        self.load_button = ctk.CTkButton(tab, text="Load Notes (Ctrl+R)", command=self.load_notes, font=("Roboto", 14),
-                                         corner_radius=10, fg_color="#007AFF", border_width=0, hover_color="#005BB5")
-        self.load_button.grid(row=1, column=0, pady=15)
+    def save_details(self):
+        old_name = self.task["name"]
+        new_name = self.name_edit.text()
+        self.task["name"] = new_name
+        self.task["due_date"] = self.due_date_edit.date().toString("yyyy-MM-dd")
+        self.task["expected_time"] = self.expected_time_spin.value()
+        self.task["actual_time"] = self.actual_time_spin.value()
+        if self.task["actual_time"] > 0:
+            self.adjust_review_interval()
+        # Update daily note if task name changed
+        if old_name != new_name and self.task.get("daily_note"):
+            self.update_daily_note_name(old_name, new_name)
+        self.parent().save_tasks()
+        self.accept()
 
-        # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(tab, mode="indeterminate", corner_radius=5)
-        self.progress_bar.grid(row=2, column=0, sticky="ew", pady=5)
-        self.progress_bar.grid_remove()
+    def delete_task(self):
+        self.parent().delete_task(self.task)
+        self.accept()
 
-        # Today's review
-        ctk.CTkLabel(tab, text="Today's Notes to Review (Ctrl+A to select all)", font=("Roboto", 16, "bold")).grid(
-            row=3, column=0, sticky="w", pady=10)
-        self.tree = ttk.Treeview(tab, columns=("Subject", "File", "Status", "Last Reviewed"), show="headings",
-                                 height=15, selectmode="extended")
-        self.tree.heading("Subject", text="Subject")
-        self.tree.heading("File", text="File Name")
-        self.tree.heading("Status", text="Status")
-        self.tree.heading("Last Reviewed", text="Last Reviewed")
-        self.tree.column("Subject", width=200)
-        self.tree.column("File", width=300)
-        self.tree.column("Status", width=120)
-        self.tree.column("Last Reviewed", width=120)
-        self.tree.grid(row=4, column=0, sticky="nsew")
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(4, weight=1)
+    def adjust_review_interval(self):
+        last_review = self.task["completed_reviews"][-1] if self.task["completed_reviews"] else {
+            "date": self.task["created"], "actual_time": self.task["expected_time"]}
+        base_intervals = [1, 2, 4, 7, 15, 30]
+        review_index = len(self.task["completed_reviews"])
+        interval = base_intervals[min(review_index, len(base_intervals) - 1)]
 
-        # Scrollbar
-        scrollbar = ctk.CTkScrollbar(tab, orientation="vertical", command=self.tree.yview, corner_radius=8)
-        scrollbar.grid(row=4, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        time_ratio = self.task["actual_time"] / self.task["expected_time"]
+        interval *= (0.8 if time_ratio > 1 else 1.2 if time_ratio < 1 else 1)
 
-        # Status update buttons
-        button_frame = ctk.CTkFrame(tab, corner_radius=10, fg_color="#F5F5F7")
-        button_frame.grid(row=5, column=0, pady=20)
-        ctk.CTkButton(button_frame, text="Set Proficient (Ctrl+P)", command=lambda: self.update_status("proficient"),
-                      font=("Roboto", 12), corner_radius=8, fg_color="#34C759", border_width=0,
-                      hover_color="#2EA043").grid(row=0, column=0, padx=10)
-        ctk.CTkButton(button_frame, text="Set Not Proficient (Ctrl+N)",
-                      command=lambda: self.update_status("not_proficient"), font=("Roboto", 12), corner_radius=8,
-                      fg_color="#FF9500", border_width=0, hover_color="#DB8000").grid(row=0, column=1, padx=10)
-        ctk.CTkButton(button_frame, text="Set Forgotten (Ctrl+F)", command=lambda: self.update_status("forgotten"),
-                      font=("Roboto", 12), corner_radius=8, fg_color="#FF3B30", border_width=0,
-                      hover_color="#D32F2F").grid(row=0, column=2, padx=10)
+        last_date = datetime.strptime(last_review["date"], "%Y-%m-%d")
+        next_date = last_date + timedelta(days=int(interval))
+        self.task["review_dates"] = [next_date.strftime("%Y-%m-%d")]
+        self.task["completed_reviews"].append(
+            {"date": datetime.now().strftime("%Y-%m-%d"), "actual_time": self.task["actual_time"]})
 
-        # Style Treeview
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Treeview", background="#FFFFFF", foreground="#000000", fieldbackground="#FFFFFF",
-                        font=("Roboto", 10), rowheight=28)
-        style.configure("Treeview.Heading", background="#E8ECEF", foreground="#000000", font=("Roboto", 11, "bold"),
-                        padding=8)
-        style.map("Treeview", background=[("selected", "#007AFF")], foreground=[("selected", "#FFFFFF")])
-
-    def create_stats_tab(self, tab):
-        # Fetch review data
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT last_reviewed FROM notes WHERE last_reviewed IS NOT NULL")
-        review_dates = [row[0] for row in cursor.fetchall()]
-
-        # Aggregate reviews by day (last 30 days)
-        today = datetime.now().date()
-        start_date = today - timedelta(days=30)
-        date_range = [start_date + timedelta(days=x) for x in range(31)]
-        review_counts = Counter(datetime.strptime(date, "%Y-%m-%d").date() for date in review_dates)
-        counts = [review_counts.get(date, 0) for date in date_range]
-
-        # Create matplotlib figure
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(date_range, counts, marker='o', color='#007AFF', linewidth=2)
-        ax.set_title("Notes Reviewed Per Day (Last 30 Days)", fontsize=14, pad=10)
-        ax.set_xlabel("Date", fontsize=12)
-        ax.set_ylabel("Number of Reviews", fontsize=12)
-        ax.grid(True, linestyle='--', alpha=0.7)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
-        plt.xticks(rotation=45, ha="right")
-        fig.tight_layout()
-
-        # Embed in Tkinter
-        canvas = FigureCanvasTkAgg(fig, master=tab)
-        canvas.draw()
-        canvas.get_tk_widget().pack(padx=20, pady=20, fill="both", expand=True)
-
-        # Refresh button
-        ctk.CTkButton(tab, text="Refresh Chart", command=lambda: self.refresh_stats_tab(tab), font=("Roboto", 12),
-                      corner_radius=8, fg_color="#007AFF", hover_color="#005BB5").pack(pady=10)
-
-    def refresh_stats_tab(self, tab):
-        # Clear existing content
-        for widget in tab.winfo_children():
-            widget.destroy()
-
-        # Recreate the chart
-        self.create_stats_tab(tab)
-
-    def create_checkin_tab(self, tab):
-        # Calendar
-        self.calendar = Calendar(tab, selectmode="none", date_pattern="yyyy-mm-dd", font=("Roboto", 12))
-        self.calendar.pack(padx=20, pady=20, fill="both", expand=True)
-
-        # Update stickers
-        self.update_calendar_stickers()
-
-        # Refresh button
-        ctk.CTkButton(tab, text="Refresh Calendar", command=self.update_calendar_stickers, font=("Roboto", 12),
-                      corner_radius=8, fg_color="#007AFF", hover_color="#005BB5").pack(pady=10)
-
-    def update_calendar_stickers(self):
-        cursor = self.conn.cursor()
-        today = datetime.now().date()
-        start_date = today - timedelta(days=60)  # Check last 60 days for stickers
-        date_range = [start_date + timedelta(days=x) for x in range(61)]
-
-        for date in date_range:
-            date_str = date.isoformat()
-            # Check if all notes due on this date were reviewed
-            cursor.execute(
-                "SELECT COUNT(*) FROM notes WHERE next_review <= ? AND (last_reviewed != ? OR last_reviewed IS NULL)",
-                (date_str, date_str))
-            pending = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM notes WHERE last_reviewed = ?", (date_str,))
-            reviewed = cursor.fetchone()[0]
-            if pending == 0 and reviewed > 0:  # All due notes reviewed
-                self.calendar.calevent_create(date, "Completed", "sticker")
-
-        # Style completed days
-        self.calendar.tag_config("sticker", background="#34C759", foreground="#FFFFFF")
-
-    def select_all_notes(self, event=None):
-        if self.tabview.get() != "Review Notes":
+    def update_daily_note_name(self, old_name, new_name):
+        daily_note_path = Path(self.task.get("daily_note", ""))
+        if not daily_note_path.exists():
             return
-        for item in self.tree.get_children():
-            self.tree.selection_add(item)
-        return "break"
+        try:
+            with open(daily_note_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # Replace old task name heading with new one
+            content = content.replace(f"# {old_name}", f"# {new_name}")
+            with open(daily_note_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            print(f"Failed to update daily note name: {e}")
 
-    def browse_vault(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.vault_entry.delete(0, "end")
-            self.vault_entry.insert(0, path)
-            self.vault_path = path
+    def load_note(self):
+        from re import findall
 
-    def load_notes(self):
-        if not self.vault_entry.get():
-            messagebox.showerror("Error", "Please select a vault path!")
+        daily_note_path = Path(self.task.get("daily_note", ""))
+        if not daily_note_path.exists():
+            return "未找到每日笔记"
+
+        # Read daily note content
+        try:
+            with open(daily_note_path, "r", encoding="utf-8") as f:
+                daily_content = f.read()
+            # Extract section for this task
+            task_section = self.extract_task_section(daily_content, self.task["name"])
+        except Exception as e:
+            return f"读取每日笔记失败: {str(e)}"
+
+        # Find [[link]] patterns in the task section
+        links = findall(r'\[\[([^\]]+)\]\]', task_section)
+        if not links:
+            return task_section[:200] + "..." if len(task_section) > 200 else task_section
+
+        # Collect content from linked files
+        notes_content = []
+        notes_base_dir = Path(NOTES_DIR)
+        for link in links:
+            note_path = notes_base_dir / f"{link}.md"
+            if note_path.exists():
+                try:
+                    with open(note_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                        notes_content.append(f"### {link}\n{content[:200]}{'...' if len(content) > 200 else ''}")
+                except Exception as e:
+                    notes_content.append(f"### {link}\n读取失败: {str(e)}")
+            else:
+                notes_content.append(f"### {link}\n未找到文件")
+
+        # Combine task section and linked content
+        combined_content = task_section[:200] + "\n\n" + "\n\n".join(notes_content)
+        return combined_content[:1000] + "..." if len(combined_content) > 1000 else combined_content
+
+    def extract_task_section(self, content, task_name):
+        # Find the section starting with # task_name
+        import re
+        pattern = rf'# {re.escape(task_name)}\n(.*?)(?=\n# |\Z)'
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+
+class TaskCard(QWidget):
+    def __init__(self, task_data, parent=None):
+        super().__init__(parent)
+        self.task = task_data
+        self.initUI()
+
+    def initUI(self):
+        self.layout = QHBoxLayout()
+
+        # Checkbox for completion
+        self.checkbox = QCheckBox(self.task["name"])
+        self.checkbox.setChecked(self.task.get("completed", False))
+        self.checkbox.stateChanged.connect(self.toggle_completion)
+        self.layout.addWidget(self.checkbox)
+
+        # Edit button
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.clicked.connect(self.open_dialog)
+        self.layout.addWidget(self.edit_button)
+
+        # Review time arrow
+        self.arrow_label = QLabel()
+        self.update_arrow()
+        self.layout.addWidget(self.arrow_label)
+
+        self.setLayout(self.layout)
+
+        # Enable double-click to open dialog
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.mouseDoubleClickEvent = self.open_dialog_on_double_click
+
+        # 样式，灰色样式用于非今日任务
+        today = datetime.now().strftime("%Y-%m-%d")
+        is_due_today = today in self.task.get("review_dates", [])
+        self.setStyleSheet("""
+            QWidget {
+                background-color: %s;
+                border-radius: 8px;
+                padding: 5px;
+                margin: 5px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+            }
+            QWidget:hover {
+                box-shadow: 0 6px 12px rgba(0, 0, 0, 0.7);
+            }
+            QCheckBox, QPushButton {
+                color: #FFFFFF;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45A049;
+            }
+            QPushButton:nth-child(2) {
+                background-color: #FF5555;
+            }
+            QPushButton:nth-child(2):hover {
+                background-color: #FF3333;
+            }
+            QLabel {
+                color: #FFFFFF;
+                font-size: 12px;
+            }
+        """ % ("#333333" if is_due_today else "#444444"))
+
+    def toggle_completion(self):
+        self.task["completed"] = self.checkbox.isChecked()
+        self.parent().save_tasks()
+
+    def update_arrow(self):
+        if not self.task["review_dates"]:
+            self.arrow_label.setText("")
             return
+        next_review = datetime.strptime(self.task["review_dates"][0], "%Y-%m-%d")
+        today = datetime.now()
+        diff_days = (next_review - today).days
+        color = "color: red;" if diff_days <= 0 else "color: yellow;" if diff_days <= 3 else "color: green;"
+        date_str = next_review.strftime("%m-%d")
+        self.arrow_label.setText(f"➜ {date_str}")
+        self.arrow_label.setStyleSheet(color)
 
-        self.load_button.configure(state="disabled")
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        self.root.update()
+    def open_dialog(self, event=None):
+        dialog = TaskEditDialog(self.task, self.parent())
+        dialog.exec()
+        self.checkbox.setText(self.task["name"])
+        self.checkbox.setChecked(self.task.get("completed", False))
+        self.update_arrow()
 
-        self.vault_path = self.vault_entry.get()
-        self.notes = []
-        cursor = self.conn.cursor()
-
-        # Clear treeview
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        # Scan for .md files
-        for folder in os.listdir(self.vault_path):
-            folder_path = os.path.join(self.vault_path, folder)
-            if os.path.isdir(folder_path):
-                for file_path in glob.glob(os.path.join(folder_path, "*.md")):
-                    rel_path = os.path.relpath(file_path, self.vault_path)
-                    file_name = os.path.basename(file_path)
-                    subject = folder
-
-                    cursor.execute("SELECT * FROM notes WHERE file_path = ?", (rel_path,))
-                    note = cursor.fetchone()
-                    if not note:
-                        cursor.execute('''
-                            INSERT INTO notes (file_path, subject, status, review_count, last_reviewed, next_review)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (rel_path, subject, "not_proficient", 0, None, datetime.now().date().isoformat()))
-                        self.conn.commit()
-
-        # Load today's notes
-        today = datetime.now().date().isoformat()
-        cursor.execute("SELECT file_path, subject, status, last_reviewed FROM notes WHERE next_review <= ?", (today,))
-        for row in cursor.fetchall():
-            file_name = os.path.basename(row[0])
-            status_display = {"proficient": "Proficient", "not_proficient": "Not Proficient",
-                              "forgotten": "Forgotten"}.get(row[2], row[2])
-            self.tree.insert("", "end", values=(row[1], file_name, status_display, row[3] or "Never"))
-
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.load_button.configure(state="normal")
-
-    def update_status(self, status):
-        if self.tabview.get() != "Review Notes":
-            return
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select at least one note to update!")
-            return
-
-        cursor = self.conn.cursor()
-        today = datetime.now().date()
-        for item in selected:
-            file_name = self.tree.item(item)["values"][1]
-            subject = self.tree.item(item)["values"][0]
-            file_path = os.path.join(subject, file_name)
-
-            cursor.execute("SELECT review_count FROM notes WHERE file_path = ?", (file_path,))
-            review_count = cursor.fetchone()[0]
-            intervals = self.review_intervals[status]
-            interval_idx = min(review_count, len(intervals) - 1)
-            next_review = (today + timedelta(days=intervals[interval_idx])).isoformat()
-
-            cursor.execute('''
-                UPDATE notes
-                SET status = ?, review_count = review_count + 1, last_reviewed = ?, next_review = ?
-                WHERE file_path = ?
-            ''', (status, today.isoformat(), next_review, file_path))
-            self.conn.commit()
-
-        self.load_notes()
-        self.update_calendar_stickers()
-
-    def on_closing(self):
-        if self.conn:
-            self.conn.close()
-        self.root.destroy()
+    def open_dialog_on_double_click(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.open_dialog()
 
 
-if __name__ == "__main__":
-    root = ctk.CTk()
-    app = EbbinghausNoteApp(root)
-    root.mainloop()
+class TaskNotebook(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.tasks = []
+        self.load_tasks()
+        self.initUI()
+
+    def initUI(self):
+        self.layout = QVBoxLayout()
+
+        # 任务输入框
+        self.task_input = QLineEdit()
+        self.task_input.setPlaceholderText("输入任务并按回车创建...")
+        self.task_input.returnPressed.connect(self.add_task)
+        self.layout.addWidget(self.task_input)
+
+        # 任务列表
+        self.task_list = QVBoxLayout()
+        self.layout.addLayout(self.task_list)
+
+        self.setLayout(self.layout)
+        self.setWindowTitle("任务管理记事本")
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1C1C1C;
+            }
+            QLineEdit {
+                background-color: #333333;
+                color: #FFFFFF;
+                border: 1px solid #555555;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QLabel {
+                color: #FFFFFF;
+                font-size: 14px;
+                padding: 10px;
+            }
+        """)
+        self.resize(600, 400)
+        self.show()
+
+        # 初始化任务卡片
+        self.load_task_cards()
+
+    def load_tasks(self):
+        print(f"Loading tasks from: {DATA_FILE}")  # Debug file path
+        try:
+            if not CONFIG_DIR.exists():
+                CONFIG_DIR.mkdir(parents=True)
+            if not DATA_FILE.exists():
+                # Initialize empty tasks file if it doesn't exist
+                with open(DATA_FILE, "w", encoding="utf-8") as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                self.tasks = json.load(f)
+            # Migrate existing tasks to include new fields
+            modified = False
+            for task in self.tasks:
+                if "completed" not in task:
+                    task["completed"] = False
+                    modified = True
+                if "daily_note" not in task:
+                    task["daily_note"] = ""
+                    modified = True
+            # Save only if migration modified tasks
+            if modified:
+                self.save_tasks()
+            print(f"Loaded {len(self.tasks)} tasks")  # Debug task count
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from {DATA_FILE}: {e}. Initializing empty task list.")
+            self.tasks = []
+            self.save_tasks()  # Reset file to valid JSON
+        except PermissionError as e:
+            print(f"Permission error accessing {DATA_FILE}: {e}. Using empty task list.")
+            self.tasks = []
+        except Exception as e:
+            print(f"Unexpected error loading tasks from {DATA_FILE}: {e}. Using empty task list.")
+            self.tasks = []
+
+    def save_tasks(self):
+        try:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+        except PermissionError as e:
+            print(f"Permission error saving to {DATA_FILE}: {e}")
+        except Exception as e:
+            print(f"Unexpected error saving to {DATA_FILE}: {e}")
+
+    def load_task_cards(self):
+        # Clear existing cards
+        for i in reversed(range(self.task_list.count())):
+            self.task_list.itemAt(i).widget().setParent(None)
+
+        # Show all tasks, with visual distinction for those due today
+        if not self.tasks:
+            # Display encouraging message if no tasks exist
+            encouraging_label = QLabel("No tasks yet! Create one to get started!")
+            self.task_list.addWidget(encouraging_label)
+        else:
+            for task in self.tasks:
+                task_card = TaskCard(task, self)
+                self.task_list.addWidget(task_card)
+
+    def create_daily_note(self, date_str, task_name):
+        daily_notes_dir = Path(NOTES_DIR) / "daily_notes"
+        daily_notes_dir.mkdir(parents=True, exist_ok=True)
+        daily_note_path = daily_notes_dir / f"{date_str}.md"
+
+        # Add task under its own heading
+        content = f"# {task_name}\n- Related Knowledge Points: \n"
+        if daily_note_path.exists():
+            with open(daily_note_path, "r", encoding="utf-8") as f:
+                existing_content = f.read()
+            # Append new task if it doesn't exist
+            if f"# {task_name}" not in existing_content:
+                content = existing_content.rstrip() + "\n\n" + content
+            else:
+                content = existing_content
+        with open(daily_note_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return daily_note_path
+
+    def add_task(self):
+        task_name = self.task_input.text()
+        if task_name:
+            today = datetime.now().strftime("%Y-%m-%d")
+            category = task_name.split("-")[0] if "-" in task_name else "未分类"
+            daily_note_path = self.create_daily_note(today, task_name)
+            task = {
+                "name": task_name,
+                "category": category,
+                "created": today,
+                "due_date": today,
+                "daily_note": str(daily_note_path),
+                "expected_time": 1,
+                "actual_time": None,
+                "review_dates": [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")],
+                "completed_reviews": [],
+                "completed": False
+            }
+            self.tasks.append(task)
+            self.save_tasks()
+            # Create and add task card immediately
+            task_card = TaskCard(task, self)
+            # Clear current task list (including encouraging message) and add new task
+            for i in reversed(range(self.task_list.count())):
+                self.task_list.itemAt(i).widget().setParent(None)
+            self.task_list.addWidget(task_card)
+            # Re-add other tasks
+            for other_task in self.tasks:
+                if other_task != task:
+                    other_task_card = TaskCard(other_task, self)
+                    self.task_list.addWidget(other_task_card)
+            self.task_input.clear()
+
+    def delete_task(self, task):
+        # Remove task from daily note
+        daily_note_path = Path(task.get("daily_note", ""))
+        if daily_note_path.exists():
+            try:
+                with open(daily_note_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                # Remove section for this task
+                import re
+                pattern = rf'# {re.escape(task["name"])}\n(.*?)(?=\n# |\Z)'
+                content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+                with open(daily_note_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                print(f"Failed to update daily note on delete: {e}")
+        self.tasks.remove(task)
+        self.save_tasks()
+        self.load_task_cards()
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = TaskNotebook()
+    sys.exit(app.exec())
